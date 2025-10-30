@@ -1,0 +1,187 @@
+% % mpc = case14;            % Load IEEE 14-bus case
+% % n_bus = size(mpc.bus,1);
+% % 
+% % % Run base power flow
+% % results = runpf(mpc);
+% % 
+% % % Voltage base and limits
+% % V_base = results.bus(:,8);  % Final voltage magnitude from power flow
+% % V_max = mpc.bus(:,12);      % Upper voltage limit at each bus (usually 1.06 or 1.1 pu)
+% %                             % Column 12 in MATPOWER bus matrix is Vmax
+% % 
+% % % Simple ATC proxy: margin to upper voltage (in pu)
+% % ATC_margin = V_max - V_base;
+% % 
+% % % If you want, convert to MW by multiplying by the baseMVA
+% % % ATC_MW = ATC_margin * mpc.baseMVA;
+% % 
+% % % Plot
+% % figure;
+% % plot(1:n_bus, ATC_margin*100, 'b-o', 'LineWidth', 2);
+% % xlabel('Bus Number');
+% % ylabel('ATC Margin to V_{max} (pu)');
+% % title('Available Transfer Capability (ATC) Margin per Bus (case14)');
+% % grid on;
+% % 
+% % % % Optional: mark load buses only
+% % % load_buses = find(mpc.bus(:,3) > 0);
+% % % hold on;
+% % % plot(load_buses, ATC_margin(load_buses)*100, 'ro', 'MarkerSize', 8, 'LineWidth', 2);
+% % % legend('All Buses', 'Load Buses');
+% 
+% % Parameters
+% n_bus = 14; % change to 30 for case30
+% nScenarios = 50; % scenarios per model
+% nModels = 8;
+% saveResults = true;
+% outDir = pwd;
+% 
+% % Load base case
+% if n_bus == 14
+%     mpc = case14;
+% elseif n_bus == 30
+%     mpc = case30;
+% else
+%     error('Unsupported bus number');
+% end
+% 
+% % Base loads
+% base_Pd = mpc.bus(:,3);
+% base_Qd = mpc.bus(:,4);
+% 
+% % Initialize storage: buses x scenarios x models
+% voltage_profiles = zeros(n_bus, nScenarios, nModels);
+% 
+% % Generate base case temporal data (model 1)
+% for k = 1:nScenarios
+%     variation = 0.1 * (2*rand(n_bus,1) - 1); % ±10%
+%     mpc.bus(:,3) = base_Pd .* (1 + variation);
+%     mpc.bus(:,4) = base_Qd .* (1 + variation);
+%     results = runpf(mpc);
+%     voltage_profiles(:,k,1) = results.bus(:,8);
+% end
+% 
+% % For intermediate models 2 to nModels-1 with incremental improvement
+% for modelIdx = 2:nModels-1
+%     % Slightly reduced load variation (improved stability for models)
+%     load_scaling = 1 - (modelIdx-1)*(0.05); % Example gradual improvement scaling load variation
+%     for k = 1:nScenarios
+%         variation = 0.1 * load_scaling * (2*rand(n_bus,1) - 1);
+%         mpc.bus(:,3) = base_Pd .* (1 + variation);
+%         mpc.bus(:,4) = base_Qd .* (1 + variation);
+%         results = runpf(mpc);
+%         voltage_profiles(:,k,modelIdx) = results.bus(:,8);
+%     end
+% end
+% 
+% % Proposed model: smallest fluctuation ±2%
+% for k = 1:nScenarios
+%     variation = 0.02 * (2*rand(n_bus,1) - 1);
+%     mpc.bus(:,3) = base_Pd .* (1 + variation);
+%     mpc.bus(:,4) = base_Qd .* (1 + variation);
+%     results = runpf(mpc);
+%     voltage_profiles(:,k,nModels) = results.bus(:,8);
+% end
+% 
+% % Calculate temporal uncertainty (std/mean) for all models & buses
+% temporal_uncertainty = zeros(n_bus, nModels);
+% for m = 1:nModels
+%     mean_voltage = mean(voltage_profiles(:, :, m), 2);
+%     std_voltage = std(voltage_profiles(:, :, m), 0, 2);
+%     temporal_uncertainty(:, m) = std_voltage ./ mean_voltage;
+% end
+% 
+% % Plot temporal uncertainty of all models
+% figure('Name', 'Temporal Uncertainty across Models');
+% colors = lines(nModels);
+% for m = 1:nModels
+%     plot(1:n_bus, temporal_uncertainty(:, m), 'LineWidth', 1.8, 'Color', colors(m,:)); hold on;
+% end
+% xlabel('Bus Number', 'FontWeight', 'bold');
+% ylabel('Temporal Uncertainty (std/mean)');
+% title('Temporal Uncertainty per Bus for 8 Models');
+% legend(arrayfun(@(x) sprintf('Model %d', x), 1:nModels, 'UniformOutput', false), 'Location', 'northeast');
+% grid on;
+% set(gca, 'FontWeight', 'bold');
+% set(gcf, 'Color', 'w');
+% 
+% % Save results
+% if saveResults
+%     csvwrite(fullfile(outDir, 'temporal_uncertainty_all_models.csv'), temporal_uncertainty);
+%     saveas(gcf, fullfile(outDir, 'temporal_uncertainty_all_models.png'));
+% end
+
+clc; clear; close all;
+
+% ==============================
+% ⚡ Load IEEE 14-Bus Case
+% ==============================
+define_constants;
+mpc = loadcase('case14');
+
+n_scenarios = 24;     % e.g., 24 hours or 24 time intervals
+ATC_values = zeros(1, n_scenarios);
+
+% ==============================
+% ⚙️ Run Scenarios (simulate temporal variation)
+% ==============================
+for t = 1:n_scenarios
+    
+    % Clone base case for this time step
+    temp_case = mpc;
+    
+    % Simulate load and generation variation (±10%)
+    load_factor = 1 + 0.1 * sin(2*pi*t/24);  % daily load fluctuation
+    gen_factor  = 1 + 0.05 * cos(2*pi*t/24); % slight gen variation
+    
+    % Modify active power demand (Pd) and generation (Pg)
+    temp_case.bus(:, PD) = mpc.bus(:, PD) * load_factor;
+    temp_case.gen(:, PG) = mpc.gen(:, PG) * gen_factor;
+    
+    % Run power flow for each scenario
+    results = runpf(temp_case);
+    
+    % Compute Available Transfer Capability (approx)
+    % Simplified: total generation - total load (in MW)
+    total_gen = sum(results.gen(:, PG));
+    total_load = sum(results.bus(:, PD));
+    
+    ATC_values(t) = total_gen - total_load;
+end
+
+% ==============================
+% 📈 Temporal Uncertainty Calculation
+% ==============================
+ATC_mean = mean(ATC_values);
+ATC_max  = max(ATC_values);
+ATC_min  = min(ATC_values);
+
+Temporal_Uncertainty = (ATC_max - ATC_min) / ATC_mean * 100; % in %
+
+fprintf('Mean ATC = %.2f MW\n', ATC_mean);
+fprintf('Max ATC = %.2f MW\n', ATC_max);
+fprintf('Min ATC = %.2f MW\n', ATC_min);
+fprintf('Temporal Uncertainty (TU) = %.2f %%\n', Temporal_Uncertainty);
+
+% ==============================
+% 📊 Plot Results
+% ==============================
+figure('Name','Temporal Uncertainty - IEEE 14 Bus','Color','w');
+plot(1:n_scenarios, ATC_values, 'LineWidth', 2.2, 'Color', [0.2 0.4 0.9]);
+hold on;
+
+% Mean line
+yline(ATC_mean, '--r', 'LineWidth', 1.5);
+text(n_scenarios-5, ATC_mean+0.2, sprintf('Mean = %.2f MW', ATC_mean), ...
+    'FontWeight','bold','Color','r');
+
+grid on;
+xlabel('Time Interval (e.g., Hours)', 'FontWeight', 'bold');
+ylabel('Available Transfer Capability (MW)', 'FontWeight', 'bold');
+title(sprintf('Temporal Variation of ATC (TU = %.2f%%)', Temporal_Uncertainty), ...
+    'FontWeight','bold');
+set(gca, 'FontWeight', 'bold', 'FontSize', 11);
+
+% Save results
+writematrix([ (1:n_scenarios)' ATC_values' ], 'Temporal_Uncertainty_IEEE14.csv');
+saveas(gcf, 'Temporal_Uncertainty_IEEE14.png');
